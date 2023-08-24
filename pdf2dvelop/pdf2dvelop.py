@@ -179,6 +179,8 @@ credprofs = get_profiles(prof_file)
 
 pathlist = Path(source_dir).rglob('*.pdf')
 file_counter = 0
+# Connect to d.velop
+dms = DvelopDmsPy(hostname=dvelop_host, api_key=dvelop_key)
 
 for sfile in pathlist:
     file_counter += 1
@@ -199,8 +201,7 @@ for sfile in pathlist:
     # Uploading files to archive
     logger.info(f"Splitted file in {len(splitted_files.keys())} parts. Uploading...")
 
-    # Connect to d.velop
-    dms = DvelopDmsPy(hostname=dvelop_host, api_key=dvelop_key)
+
 
     for file_part in splitted_files.keys():
         upload_file_creditor = splitted_files.get(file_part)
