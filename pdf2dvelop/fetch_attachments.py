@@ -64,6 +64,8 @@ def download_attachment(ppart, tempfolder: str) -> str | None:
     else:
         orig_filename = ppart.get_filename()
 
+    orig_filename = orig_filename.replace(" ", "")
+
     orig_filebase = os.path.splitext(orig_filename)[0]
     orig_extension = os.path.splitext(orig_filename)[1]
     dest_filename = "{}_{}{}".format(orig_filebase, get_random_string(6), orig_extension)
