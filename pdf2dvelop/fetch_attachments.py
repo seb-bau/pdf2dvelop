@@ -19,6 +19,17 @@ def handle_unhandled_exception(exc_type, exc_value, exc_traceback):
     logger.critical("Unhandled exception", exc_info=(exc_type, exc_value, exc_traceback))
 
 
+def kill_umlaut(string_with_umlaut: str):
+    string_with_umlaut = string_with_umlaut.replace('Ä', 'Ae')
+    string_with_umlaut = string_with_umlaut.replace('Ö', 'Oe')
+    string_with_umlaut = string_with_umlaut.replace('Ü', 'Ue')
+    string_with_umlaut = string_with_umlaut.replace('ß', 'ss')
+    string_with_umlaut = string_with_umlaut.replace('ä', 'ae')
+    string_with_umlaut = string_with_umlaut.replace('ö', 'oe')
+    string_with_umlaut = string_with_umlaut.replace('ü', 'ue')
+    return string_with_umlaut
+
+
 settings = dotenv_values(os.path.join(os.path.abspath(os.path.dirname(__file__)), '.env'))
 log_method = settings.get("log_method", "file").lower()
 log_level = settings.get("log_level", "info").lower()
@@ -45,9 +56,13 @@ logger.info("fetch_attachments gestartet.")
 
 
 def download_attachment(ppart, tempfolder: str) -> str | None:
-    orig_filename = ppart.get_filename()
-    if not orig_filename:
+    if not ppart.get_filename():
         return None
+    efilename, encoding = decode_header(ppart.get_filename())[0]
+    if encoding is not None:
+        orig_filename = efilename.decode(encoding)
+    else:
+        orig_filename = ppart.get_filename()
 
     orig_filebase = os.path.splitext(orig_filename)[0]
     orig_extension = os.path.splitext(orig_filename)[1]
@@ -123,10 +138,14 @@ if "access_token" in result:
 
     # Relative temp-dir
     ptempdir = settings.get("att_dlpath")
+    workcnt = 0
+    attfiles = []
 
     # Durch jede E-Mail iterieren
     try:
         for message_id in message_ids:
+            workcnt += 1
+            mail_has_attachment = False
             # E-Mail abrufen
             _, email_data = mailbox.fetch(message_id, '(RFC822)')
             for response in email_data:
@@ -135,7 +154,7 @@ if "access_token" in result:
 
                     msgsubject, msgsender = obtain_header(msg)
                     print("Subject:", msgsubject)
-                    attfiles = []
+
                     msgfullbody = ""
 
                     if msg.is_multipart():
@@ -146,13 +165,19 @@ if "access_token" in result:
                             if "attachment" in content_disposition or "inline" in content_disposition:
                                 dlfilepath = download_attachment(part, ptempdir)
                                 if dlfilepath is not None:
-                                    attfiles.append(dlfilepath)
+                                    mail_has_attachment = True
+                                    print(dlfilepath)
+                                    if dlfilepath in attfiles:
+                                        print(f"{dlfilepath} doppelt!")
+                                    else:
+                                        attfiles.append(dlfilepath)
+                                    print(len(attfiles))
 
                     # E-Mail in den "BACKUP"-Ordner verschieben
-                    # mailbox.copy(message_id, mail_backup_to)
+                    mailbox.copy(message_id, mail_backup_to)
 
                     # Ursprüngliche E-Mail im Postfach löschen
-                    # mailbox.store(message_id, '+FLAGS', '\\Deleted')
+                    mailbox.store(message_id, '+FLAGS', '\\Deleted')
 
     except imaplib.IMAP4.abort as e:
         logger.error(f"IMAP4-Fehler: {e.args}")
@@ -161,6 +186,7 @@ if "access_token" in result:
     mailbox.expunge()
     mailbox.close()
     mailbox.logout()
+    print(workcnt)
 
 else:
     print(result.get("error"))
