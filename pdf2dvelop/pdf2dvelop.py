@@ -108,6 +108,7 @@ def process_pdf_file(input_pdf_file: str, profile_dict: dict, temp_path: str):
             logger.debug(f"Creditor: {cr_id}. Doc completed: {cr_comp}")
             if cr_id is None:
                 logger.error(f"Could not determin creditor for file {input_pdf_file} page {page_num + 1}")
+                logger.error(page_text)
                 return None
 
             if current_doc is None:
