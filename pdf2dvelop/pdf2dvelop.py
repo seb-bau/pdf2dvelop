@@ -383,8 +383,9 @@ wowi_host = settings.get("wowi_host")
 wowi_user = settings.get("wowi_user")
 wowi_pass = settings.get("wowi_pass")
 wowi_key = settings.get("wowi_key")
+wowi_cache_buildings = settings.get("wowi_cache_buildings")
 openwowi = WowiPy(wowi_host, wowi_user, wowi_pass, wowi_key)
-openwowi.cache_from_disk(openwowi.CACHE_BUILDING_LANDS, "C:\\dumps\\building_lands.dat")
+openwowi.cache_from_disk(openwowi.CACHE_BUILDING_LANDS, wowi_cache_buildings)
 
 for sfile in pathlist:
     file_counter += 1
