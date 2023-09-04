@@ -11,6 +11,9 @@ from pathlib import Path
 from wowipy.wowipy import WowiPy, BuildingLand
 from dvelopdmspy.dvelopdmspy import DvelopDmsPy
 
+# Weitermachen: Profile um eine Einstellung zur Ziel-Kategorie erweitern, damit mehrere Prozesse mit einer Anwendungs-
+# instanz auskommen können.
+
 
 def handle_unhandled_exception(exc_type, exc_value, exc_traceback):
     if issubclass(exc_type, KeyboardInterrupt):
@@ -49,7 +52,11 @@ def get_props_from_doc(pdoctext: str, pprops: list, wowi: WowiPy, psettings: dic
             prop_value = re.search(item.get("regex"), pdoctext)
             regex_group = int(item.get("regex_group"))
             if prop_value is not None:
-                prop_value = prop_value.group(regex_group).strip()
+                replace_value = item.get("replace")
+                if replace_value is not None:
+                    prop_value = replace_value
+                else:
+                    prop_value = prop_value.group(regex_group).strip()
         elif item_type == "combine":
             item_value = str(item.get("value"))
             rvars = re.findall('<(.*?)>', item_value, re.DOTALL)
@@ -57,11 +64,12 @@ def get_props_from_doc(pdoctext: str, pprops: list, wowi: WowiPy, psettings: dic
                 for var_match in rvars:
                     stored_val = stored_vals.get(var_match)
                     if stored_val is None:
-                        stored_val = "Unbekannt"
+                        stored_val = ""
                     logger.debug(f"Match: {[var_match]}")
                     logger.debug(f"Stored: {stored_val}")
 
                     item_value = item_value.replace(f"<{var_match}>", stored_val)
+            item_value = item_value.replace("  ", " ").strip()
             prop_value = item_value
 
         if item_lookup is not None and prop_value is not None and len(prop_value.strip()) > 0:
@@ -174,6 +182,10 @@ def get_profiles(profile_path: str, profile_props: dict) -> dict:
                 current_dict["prop"].append(profile_props.get(str_value.lower()))
                 continue
 
+            if str_key.lower().startswith("category"):
+                current_dict[str_key] = str_value
+                continue
+
             current_dict[str_key].append(str_value)
 
         if current_profile_id is not None and len(current_profile_id) > 0:
@@ -203,10 +215,15 @@ def get_profile_id(pdf_text: str, profile_dict: dict):
     return None
 
 
-def get_profile_id_and_completion(pdf_text: str, profile_dict: dict):
+def get_profile_id_and_completion(pdf_text: str, profile_dict: dict, old_profile: str = None,
+                                  profile_persistence: bool = False):
     pdf_text = text_without_spaces(pdf_text)
     ret_prof_comp = False
     ret_prof_id = get_profile_id(pdf_text, profile_dict)
+    # If profile_persistence is active, assume that the current page belongs to the previous profile, even
+    # if the keywords are not present on this page.
+    if ret_prof_id is None and profile_persistence:
+        ret_prof_id = old_profile
     if ret_prof_id is not None:
         ret_prof_comp = keywords_in_text(pdf_text, profile_dict.get(ret_prof_id).get("completion"))
     return ret_prof_id, ret_prof_comp
@@ -220,7 +237,7 @@ def text_without_spaces(pdf_text: str) -> str:
 
 
 def process_pdf_file(input_pdf_file: str, profile_dict: dict, temp_path: str, ignore_word_list: list,
-                     wowi: WowiPy):
+                     wowi: WowiPy, profile_persistence: bool = False):
     logger.debug(f"Processing {input_pdf_file}")
     basename = Path(input_pdf_file).stem
     ret_dict = {}
@@ -232,18 +249,20 @@ def process_pdf_file(input_pdf_file: str, profile_dict: dict, temp_path: str, ig
     current_doc = None
     current_doc_text = ""
     current_page_count = 0
+    current_cr_id = None
     for page_num in range(num_pages):
         page = pdf_reader.pages[page_num]
         page_text = page.extract_text()
         if keywords_in_text(text_without_spaces(page_text), ignore_word_list, False):
             logger.warning(f"Page {page_num + 1} ignored because of blacklist.")
             continue
-        if len(page_text.strip()) == 0:
-            logger.warning(f"No text on page {page_num + 1} of file {input_pdf_file}")
+        if len(page_text.strip()) < 20:
+            # logger.warning(f"No text on page {page_num + 1} of file {input_pdf_file}")
             continue
 
         logger.debug(f"Extracted text from page {page_num + 1}:\n{page_text}")
-        cr_id, cr_comp = get_profile_id_and_completion(page_text, profile_dict)
+        cr_id, cr_comp = get_profile_id_and_completion(page_text, profile_dict, current_cr_id, profile_persistence)
+        current_cr_id = cr_id
         logger.debug(f"Profile: {cr_id}. Doc completed: {cr_comp}")
 
         if cr_id is None:
@@ -264,23 +283,28 @@ def process_pdf_file(input_pdf_file: str, profile_dict: dict, temp_path: str, ig
 
         if cr_comp:
             dest_props = get_props_from_doc(current_doc_text, profile_dict.get(cr_id).get("prop"), wowi, settings)
+            dest_cat_guid = profile_dict.get(cr_id).get("category_id")
+            dest_cat_name = profile_dict.get(cr_id).get("category_name")
             logger.info(f"Page {page_num} dest_props: {dest_props}")
             logger.debug("End of doc, closing.")
             file_num += 1
             dest_file_path = os.path.join(temp_path, f"{basename}_p{file_num}.pdf")
-            if current_page_count > 2:
+            if current_page_count > 3:
                 print(f"{input_pdf_file} page {page_num} pagecount {current_page_count}")
             with open(dest_file_path, 'wb') as output_file:
                 current_doc.write(output_file)
                 ret_dict[dest_file_path] = {"profile_id": cr_id,
-                                            "dest_props": dest_props}
+                                            "dest_props": dest_props,
+                                            "cat_name": dest_cat_name,
+                                            "cat_id": dest_cat_guid}
             current_doc = None
             current_page_count = 0
+            current_cr_id = None
     return ret_dict
 
 
-def upload_file(upl_file_path: str, dvelop_obj: DvelopDmsPy, dest_cat: str, dest_props: list):
-    scats = dvelop_obj.add_category(dest_cat)
+def upload_file(upl_file_path: str, dvelop_obj: DvelopDmsPy, dest_cat_name: str, dest_cat_id: str, dest_props: list):
+    scats = dvelop_obj.add_category(display_name=dest_cat_name, category_guid=dest_cat_id)
     doc_id = dvelop_obj.archive_file(upl_file_path, scats[0], dest_props)
     return doc_id
 
@@ -297,8 +321,13 @@ backup_path = settings.get("backup_path", os.path.join(current_dir, "backup"))
 
 dvelop_host = settings.get("dvelop_host")
 dvelop_key = settings.get("dvelop_key")
-dvelop_cat_name = settings.get("dvelop_cat_name")
 dvelop_creditor_prop_name = settings.get("dvelop_creditor_prop_name")
+
+profiles_persist_raw = settings.get("profile_persistence")
+if profiles_persist_raw is not None and profiles_persist_raw.lower() == "true":
+    profiles_persist = True
+else:
+    profiles_persist = False
 
 # Logging
 logger = logging.getLogger(__name__)
@@ -307,6 +336,11 @@ logger.setLevel(log_levels.get(log_level, 20))
 
 # Catch unhandled exceptions
 sys.excepthook = handle_unhandled_exception
+
+# Dry Run
+dry_run = False
+if dry_run:
+    logger.info("Dry run!")
 
 if log_method == "file":
     log_file_name = f"pdf2dvelop_{datetime.now().strftime('%Y_%m_%d')}.log"
@@ -357,18 +391,20 @@ for sfile in pathlist:
     # Split files and math creditors
     logger.info(f"Processing {sfile}")
     splitted_files = process_pdf_file(str(sfile), proflist, os.path.join(current_dir, "temp"), ignore_keywords,
-                                      openwowi)
+                                      openwowi, profiles_persist)
 
     if splitted_files is None or len(splitted_files) == 0:
         err_file_path = os.path.join(error_dir, f"{sfile.name}")
         logger.error(f"Processing of file cancelled. Moving to {err_file_path}")
 
-        shutil.move(sfile, err_file_path)
+        if not dry_run:
+            shutil.move(sfile, err_file_path)
         continue
     else:
         backup_file_path = os.path.join(backup_path, "ocr", f"{sfile.name}")
         logger.debug(f"Moving splitted ocr file to {backup_file_path}.")
-        shutil.move(sfile, backup_file_path)
+        if not dry_run:
+            shutil.move(sfile, backup_file_path)
 
     # Uploading files to archive
     logger.info(f"Splitted file in {len(splitted_files.keys())} parts. Uploading...")
@@ -376,9 +412,12 @@ for sfile in pathlist:
     for file_part in splitted_files.keys():
         upload_file_settings = splitted_files.get(file_part)
         logger.info(f"Uploading {file_part} ({upload_file_settings['profile_id']})...")
+        if dry_run:
+            continue
         upl_result = upload_file(upl_file_path=file_part,
                                  dvelop_obj=dms,
-                                 dest_cat=dvelop_cat_name,
+                                 dest_cat_name=upload_file_settings['cat_name'],
+                                 dest_cat_id=upload_file_settings['cat_id'],
                                  dest_props=upload_file_settings['dest_props'])
         if upl_result is not None:
             logger.info(f"Upload successful (Document id {upl_result}")
