@@ -224,6 +224,8 @@ def get_profile_id_and_completion(pdf_text: str, profile_dict: dict, old_profile
     # if the keywords are not present on this page.
     if ret_prof_id is None and profile_persistence:
         ret_prof_id = old_profile
+    if old_profile is not None and profile_persistence:
+        ret_prof_id = old_profile
     if ret_prof_id is not None:
         ret_prof_comp = keywords_in_text(pdf_text, profile_dict.get(ret_prof_id).get("completion"))
     return ret_prof_id, ret_prof_comp
@@ -285,7 +287,7 @@ def process_pdf_file(input_pdf_file: str, profile_dict: dict, temp_path: str, ig
             dest_props = get_props_from_doc(current_doc_text, profile_dict.get(cr_id).get("prop"), wowi, settings)
             dest_cat_guid = profile_dict.get(cr_id).get("category_id")
             dest_cat_name = profile_dict.get(cr_id).get("category_name")
-            logger.info(f"Page {page_num} dest_props: {dest_props}")
+            logger.debug(f"Page {page_num} dest_props: {dest_props}")
             logger.debug("End of doc, closing.")
             file_num += 1
             dest_file_path = os.path.join(temp_path, f"{basename}_p{file_num}.pdf")
