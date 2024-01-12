@@ -25,7 +25,7 @@ sys.excepthook = handle_unhandled_exception
 def remove_leading_zeroes(input_str: str):
     output_str = re.sub(r'(\D)0*(\d+)', r'\1\2', input_str)
     if output_str is None:
-        return input_strf
+        return input_str
 
     return output_str
 
@@ -163,13 +163,13 @@ def get_mapping_props(profile_prop_path: str) -> dict:
     return ret_dict
 
 
-def get_mappings(profile_path: str, profile_props: dict) -> dict:
+def get_mappings(mapping_path: str, profile_props: dict) -> dict:
     ret_dict = {}
-    current_profile_id = ""
+    current_mapping_id = ""
     current_dict = {"prop": [],
                     "keyword": [],
                     "completion": []}
-    with open(profile_path, 'r', encoding='utf-8') as pr_file:
+    with open(mapping_path, 'r', encoding='utf-8') as pr_file:
         lines = pr_file.readlines()
         line_number = 0
         for line in lines:
@@ -178,16 +178,16 @@ def get_mappings(profile_path: str, profile_props: dict) -> dict:
             if len(line) == 0 or line[0] == "#":
                 continue
             if line.startswith("["):
-                if len(current_profile_id) > 0:
-                    ret_dict[current_profile_id] = current_dict
-                current_profile_id = re.search(r'\[(.*)\]', line).group(1)
+                if len(current_mapping_id) > 0:
+                    ret_dict[current_mapping_id] = current_dict
+                current_mapping_id = re.search(r'\[(.*)\]', line).group(1)
                 current_dict = {"prop": [],
                                 "keyword": [],
                                 "completion": []}
                 continue
             str_parts = line.split('=', 1)
             if len(str_parts) != 2:
-                logger.error(f"Illegal param count in get_profiles. Param {line} line {line_number}")
+                logger.error(f"Illegal param count in get_mappings. Param {line} line {line_number}")
                 continue  # Wirklich? Oder abbrechen?
 
             str_key = str_parts[0]
@@ -196,7 +196,7 @@ def get_mappings(profile_path: str, profile_props: dict) -> dict:
 
             if str_key.lower() == "prop":
                 if str_value.lower() not in profile_props.keys():
-                    logger.error(f"get_profiles: Line {line_number} prop {str_value} does not exist.")
+                    logger.error(f"get_mappings: Line {line_number} prop {str_value} does not exist.")
                     continue  # Oder gleich abbrechen?
                 current_dict["prop"].append(profile_props.get(str_value.lower()))
                 continue
@@ -207,8 +207,8 @@ def get_mappings(profile_path: str, profile_props: dict) -> dict:
 
             current_dict[str_key].append(str_value)
 
-        if current_profile_id is not None and len(current_profile_id) > 0:
-            ret_dict[current_profile_id] = current_dict
+        if current_mapping_id is not None and len(current_mapping_id) > 0:
+            ret_dict[current_mapping_id] = current_dict
     # print(ret_dict)
     return ret_dict
 
@@ -227,27 +227,27 @@ def keywords_in_text(p_text: str, keywordlist: list, all_words: bool = True):
     return False
 
 
-def get_profile_id(pdf_text: str, profile_dict: dict):
-    for pkey in profile_dict.keys():
-        if keywords_in_text(pdf_text, profile_dict.get(pkey).get("keyword")):
+def get_mapping_id(pdf_text: str, mapping_dict: dict):
+    for pkey in mapping_dict.keys():
+        if keywords_in_text(pdf_text, mapping_dict.get(pkey).get("keyword")):
             return pkey
     return None
 
 
-def get_profile_id_and_completion(pdf_text: str, profile_dict: dict, old_profile: str = None,
-                                  profile_persistence: bool = False):
+def get_mapping_id_and_completion(pdf_text: str, mapping_dict: dict, old_mapping: str = None,
+                                  mapping_persistence: bool = False):
     pdf_text = text_without_spaces(pdf_text)
-    ret_prof_comp = False
-    ret_prof_id = get_profile_id(pdf_text, profile_dict)
-    # If profile_persistence is active, assume that the current page belongs to the previous profile, even
+    ret_map_comp = False
+    ret_map_id = get_mapping_id(pdf_text, mapping_dict)
+    # If mapping_persistence is active, assume that the current page belongs to the previous mapping, even
     # if the keywords are not present on this page.
-    if ret_prof_id is None and profile_persistence:
-        ret_prof_id = old_profile
-    if old_profile is not None and profile_persistence:
-        ret_prof_id = old_profile
-    if ret_prof_id is not None:
-        ret_prof_comp = keywords_in_text(pdf_text, profile_dict.get(ret_prof_id).get("completion"))
-    return ret_prof_id, ret_prof_comp
+    if ret_map_id is None and mapping_persistence:
+        ret_map_id = old_mapping
+    if old_mapping is not None and mapping_persistence:
+        ret_map_id = old_mapping
+    if ret_map_id is not None:
+        ret_map_comp = keywords_in_text(pdf_text, mapping_dict.get(ret_map_id).get("completion"))
+    return ret_map_id, ret_map_comp
 
 
 def text_without_spaces(pdf_text: str) -> str:
@@ -257,9 +257,9 @@ def text_without_spaces(pdf_text: str) -> str:
     return pdf_text
 
 
-def process_pdf_file(input_pdf_file: str, profile_dict: dict, temp_path: str, ignore_word_list: list,
+def process_pdf_file(input_pdf_file: str, mapping_dict: dict, temp_path: str, ignore_word_list: list,
                      cache: WowiCache, dms: DvelopDmsPy, pconfig: configparser.ConfigParser,
-                     profile_persistence: bool = False):
+                     mapping_persistence: bool = False):
     logger.debug(f"Processing {input_pdf_file}")
     basename = Path(input_pdf_file).stem
     ret_dict = {}
@@ -283,12 +283,12 @@ def process_pdf_file(input_pdf_file: str, profile_dict: dict, temp_path: str, ig
             continue
 
         logger.debug(f"Extracted text from page {page_num + 1}:\n{page_text}")
-        cr_id, cr_comp = get_profile_id_and_completion(page_text, profile_dict, current_cr_id, profile_persistence)
+        cr_id, cr_comp = get_mapping_id_and_completion(page_text, mapping_dict, current_cr_id, mapping_persistence)
         current_cr_id = cr_id
-        logger.debug(f"Profile: {cr_id}. Doc completed: {cr_comp}")
+        logger.debug(f"Mapping: {cr_id}. Doc completed: {cr_comp}")
 
         if cr_id is None:
-            logger.error(f"Could not determin profile for file {input_pdf_file} page {page_num + 1}")
+            logger.error(f"Could not determin mapping for file {input_pdf_file} page {page_num + 1}")
             logger.error(page_text)
             return None
 
@@ -305,12 +305,12 @@ def process_pdf_file(input_pdf_file: str, profile_dict: dict, temp_path: str, ig
 
         if cr_comp:
             dest_props = get_props_from_doc(pdoctext=current_doc_text,
-                                            pprops=profile_dict.get(cr_id).get("prop"),
+                                            pprops=mapping_dict.get(cr_id).get("prop"),
                                             cache=cache,
                                             pconfig=pconfig,
                                             dms=dms)
-            dest_cat_guid = profile_dict.get(cr_id).get("category_id")
-            dest_cat_name = profile_dict.get(cr_id).get("category_name")
+            dest_cat_guid = mapping_dict.get(cr_id).get("category_id")
+            dest_cat_name = mapping_dict.get(cr_id).get("category_name")
             logger.debug(f"Page {page_num} dest_props: {dest_props}")
             logger.debug("End of doc, closing.")
             file_num += 1
@@ -397,12 +397,12 @@ def process_profile(profile_filepath: str, dms: DvelopDmsPy, cache: WowiCache):
         # Split files and math creditors
         logger.info(f"Processing {sfile}")
         splitted_files = process_pdf_file(input_pdf_file=str(sfile),
-                                          profile_dict=proflist,
+                                          mapping_dict=proflist,
                                           temp_path=os.path.join(current_dir, "temp"),
                                           ignore_word_list=ignore_keywords,
                                           cache=cache,
                                           dms=dms,
-                                          profile_persistence=mapping_persist,
+                                          mapping_persistence=mapping_persist,
                                           pconfig=config)
 
         if splitted_files is None or len(splitted_files) == 0:
