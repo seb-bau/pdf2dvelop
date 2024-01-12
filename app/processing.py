@@ -235,19 +235,36 @@ def get_mapping_id(pdf_text: str, mapping_dict: dict):
 
 
 def get_mapping_id_and_completion(pdf_text: str, mapping_dict: dict, old_mapping: str = None,
-                                  mapping_persistence: bool = False):
+                                  mapping_persistence: bool = False, mapping_persistence_sticky: bool = False):
     pdf_text = text_without_spaces(pdf_text)
     ret_map_comp = False
+    ret_seperate = False
     ret_map_id = get_mapping_id(pdf_text, mapping_dict)
-    # If mapping_persistence is active, assume that the current page belongs to the previous mapping, even
-    # if the keywords are not present on this page.
+
+    # Achtung, ggf. unerwartetes Verhalten bei mapping_persistence: Ist die persistence aktiv, wird IMMER das vorherige
+    # Mapping verwendet, auch wenn auf der aktuellen Seite ein abweichendes Mapping erkannt wird. Wird beim Scan die
+    # letzte Seite vergessen, führt das dazu, dass das nächste Dokument dem vorherigen Mapping angehängt wird.
+
+    # Es wäre denkbar, in Zukunft eine Funktion einzubauen, die bei einem abweichenden Mapping das Ende des Dokumentes
+    # für die vorletzte Seite meldet. Damit könnte man auf Fehler reagieren, die beim Scan passieren
+
     if ret_map_id is None and mapping_persistence:
         ret_map_id = old_mapping
-    if old_mapping is not None and mapping_persistence:
+    if old_mapping is not None and mapping_persistence_sticky:
         ret_map_id = old_mapping
+
+    if ret_map_id != old_mapping or old_mapping == "fallback":
+        ret_seperate = True
+
     if ret_map_id is not None:
         ret_map_comp = keywords_in_text(pdf_text, mapping_dict.get(ret_map_id).get("completion"))
-    return ret_map_id, ret_map_comp
+
+    # Fallback-Entry (falls vorhanden)
+    if ret_map_id is None:
+        if "fallback" in mapping_dict.keys():
+            ret_map_id = "fallback"
+            ret_seperate = True
+    return ret_map_id, ret_map_comp, ret_seperate
 
 
 def text_without_spaces(pdf_text: str) -> str:
@@ -259,7 +276,7 @@ def text_without_spaces(pdf_text: str) -> str:
 
 def process_pdf_file(input_pdf_file: str, mapping_dict: dict, temp_path: str, ignore_word_list: list,
                      cache: WowiCache, dms: DvelopDmsPy, pconfig: configparser.ConfigParser,
-                     mapping_persistence: bool = False):
+                     mapping_persistence: bool = False, mapping_persistence_sticky: bool = False):
     logger.debug(f"Processing {input_pdf_file}")
     basename = Path(input_pdf_file).stem
     ret_dict = {}
@@ -283,7 +300,10 @@ def process_pdf_file(input_pdf_file: str, mapping_dict: dict, temp_path: str, ig
             continue
 
         logger.debug(f"Extracted text from page {page_num + 1}:\n{page_text}")
-        cr_id, cr_comp = get_mapping_id_and_completion(page_text, mapping_dict, current_cr_id, mapping_persistence)
+        seperate: bool
+        cr_id, cr_comp, seperate = get_mapping_id_and_completion(page_text, mapping_dict,
+                                                                 current_cr_id, mapping_persistence,
+                                                                 mapping_persistence_sticky=mapping_persistence_sticky)
         current_cr_id = cr_id
         logger.debug(f"Mapping: {cr_id}. Doc completed: {cr_comp}")
 
@@ -298,12 +318,16 @@ def process_pdf_file(input_pdf_file: str, mapping_dict: dict, temp_path: str, ig
             current_doc_text = ""
             current_page_count = 0
 
-        logger.debug("Adding page to document.")
-        current_doc.add_page(page)
-        current_page_count += 1
-        current_doc_text += page_text
+        # Weiter machen: Testen, ob fallback funktioniert
+        # UND: Cache prüfen
 
-        if cr_comp:
+        if not seperate:
+            logger.debug("Adding page to document.")
+            current_doc.add_page(page)
+            current_page_count += 1
+            current_doc_text += page_text
+
+        if cr_comp or seperate:
             dest_props = get_props_from_doc(pdoctext=current_doc_text,
                                             pprops=mapping_dict.get(cr_id).get("prop"),
                                             cache=cache,
@@ -326,6 +350,13 @@ def process_pdf_file(input_pdf_file: str, mapping_dict: dict, temp_path: str, ig
             current_doc = None
             current_page_count = 0
             current_cr_id = None
+
+        if seperate:
+            logger.debug("Seperating page to document.")
+            current_doc = PyPDF2.PdfWriter()
+            current_doc.add_page(page)
+            current_page_count += 1
+            current_doc_text = page_text
     return ret_dict
 
 
@@ -338,6 +369,7 @@ def upload_file(upl_file_path: str, dvelop_obj: DvelopDmsPy, dest_cat_name: str,
 def process_profile(profile_filepath: str, dms: DvelopDmsPy, cache: WowiCache):
     config = configparser.ConfigParser(delimiters=('=',))
     config.read(profile_filepath, encoding='utf-8')
+
     current_dir = os.path.abspath(os.path.dirname(__file__))
 
     # Sanity checks
@@ -346,6 +378,9 @@ def process_profile(profile_filepath: str, dms: DvelopDmsPy, cache: WowiCache):
     profile_folder = os.path.dirname(profile_filepath).rstrip(os.path.sep)
     profile_maps = os.path.join(profile_folder, f"{profile_basename}.map")
     profile_props = os.path.join(profile_folder, f"{profile_basename}.prop")
+    if not config.getboolean("general", "enabled", fallback=True):
+        logger.warning(f"Profile {profile_name} is disabled. Skipping.")
+        return None
     logger.debug(f"Processing profile {profile_name}")
     logger.debug(f"Maps: {profile_maps}")
     logger.debug(f"Props: {profile_props}")
@@ -371,6 +406,7 @@ def process_profile(profile_filepath: str, dms: DvelopDmsPy, cache: WowiCache):
     # Diese Option steuert, ob eine Seite, zu der kein Mapping gefunden werden kann, automatisch zum vorherigen
     # Mapping gezählt werden soll. Das beißt sich ggf. mit einem Fallback-Eintrag
     mapping_persist = config.getboolean("general", "mapping_persistence", fallback=False)
+    mapping_persist_sticky = config.getboolean("general", "mapping_persistence_sticky", fallback=False)
 
     dry_run = config.getboolean("general", "dry_run", fallback=False)
     if dry_run:
@@ -403,6 +439,7 @@ def process_profile(profile_filepath: str, dms: DvelopDmsPy, cache: WowiCache):
                                           cache=cache,
                                           dms=dms,
                                           mapping_persistence=mapping_persist,
+                                          mapping_persistence_sticky=mapping_persist_sticky,
                                           pconfig=config)
 
         if splitted_files is None or len(splitted_files) == 0:
@@ -424,6 +461,7 @@ def process_profile(profile_filepath: str, dms: DvelopDmsPy, cache: WowiCache):
         for file_part in splitted_files.keys():
             upload_file_settings = splitted_files.get(file_part)
             logger.info(f"Uploading {file_part} ({upload_file_settings['profile_id']})...")
+            logger.info(upload_file_settings['dest_props'])
             if dry_run:
                 continue
             upl_result = upload_file(upl_file_path=file_part,
