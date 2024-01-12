@@ -1,0 +1,17 @@
+[general]
+# profile_path = None
+
+[dvelop]
+host = xxx.d-velop.cloud
+key = xxx
+repository = xxx
+
+[openwowi]
+cache_connection = mysql+pymysql://xxx:xxx@localhost:3306/wowicache
+
+[Logging]
+method = file
+level = debug
+# graylog_host = localhost
+# graylog_port = 12201
+# graylog_app_name = xxx

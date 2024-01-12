@@ -1,18 +1,14 @@
-import graypy
-import os
-import sys
-import logging
+import configparser
+import os.path
+
 import PyPDF2
 import re
 import shutil
-from dotenv import dotenv_values
-from datetime import datetime
+import logging
+import sys
 from pathlib import Path
-from wowipy.wowipy import WowiPy, BuildingLand
 from dvelopdmspy.dvelopdmspy import DvelopDmsPy
-
-# Weitermachen: Profile um eine Einstellung zur Ziel-Kategorie erweitern, damit mehrere Prozesse mit einer Anwendungs-
-# instanz auskommen können.
+from wowicache.models import WowiCache, Building
 
 
 def handle_unhandled_exception(exc_type, exc_value, exc_traceback):
@@ -22,23 +18,46 @@ def handle_unhandled_exception(exc_type, exc_value, exc_traceback):
     logger.critical("Unhandled exception", exc_info=(exc_type, exc_value, exc_traceback))
 
 
+logger = logging.getLogger('root')
+sys.excepthook = handle_unhandled_exception
+
+
 def remove_leading_zeroes(input_str: str):
     output_str = re.sub(r'(\D)0*(\d+)', r'\1\2', input_str)
     if output_str is None:
-        return input_str
+        return input_strf
 
     return output_str
 
 
-def address_to_building(paddr: str, wowi: WowiPy):
-    found_building = wowi.search_building(paddr, 899, 1)
-    if found_building is not None and len(found_building) > 0:
-        return found_building[0]
-    else:
-        return None
+def address_to_building(paddr: str, cache: WowiCache, config: configparser.ConfigParser):
+    paddr = paddr.replace(" ", "").strip().lower()
+    buildings = cache.session.query(Building).all()
+    building_min = config.getint("cache_settings", "building_min", fallback=1)
+    building_max = config.getint("cache_settings", "building_max", fallback=0)
+    building_delimiter = config.get("cache_settings", "building_delimiter", fallback=None)
+    for entry in buildings:
+        if entry.id_num is None:
+            continue
+        if building_delimiter is not None and building_min > 1 and building_max > 0:
+            try:
+                building_number = int(entry.id_num.split(building_delimiter)[-1])
+            except ValueError:
+                continue
+            if building_number < building_min or (building_number > 0 and building_number > building_max):
+                continue
+        if entry.street_complete is not None:
+            street = entry.street_complete.replace(" ", "").strip().lower()
+            if paddr in street:
+                return entry
+            elif paddr.replace("str.", "straße") in street:
+                return entry
+
+    return None
 
 
-def get_props_from_doc(pdoctext: str, pprops: list, wowi: WowiPy, psettings: dict):
+def get_props_from_doc(pdoctext: str, pprops: list, cache: WowiCache, pconfig: configparser.ConfigParser,
+                       dms: DvelopDmsPy):
     ret_props = []
     stored_vals = {}
     for item in pprops:
@@ -79,13 +98,13 @@ def get_props_from_doc(pdoctext: str, pprops: list, wowi: WowiPy, psettings: dic
             if item_lookup.lower() == "building_address":
                 prop_value = remove_leading_zeroes(prop_value)
                 prop_value = prop_value.replace("STRABE", "STRAßE")
-                prop_lookup_item: BuildingLand
-                prop_lookup_item = address_to_building(prop_value, wowi)
+                prop_lookup_item: Building
+                prop_lookup_item = address_to_building(prop_value, cache=cache, config=pconfig)
                 if prop_lookup_item is not None:
                     # print(f"{prop_value} --> {prop_lookup_item.id_num}")
 
-                    parent_guid_wie = psettings.get("dvelop_guid_wie")
-                    parent_guid_vwg = psettings.get("dvelop_guid_vwg")
+                    parent_guid_wie = pconfig.get("dvelop_fields", "wie")
+                    parent_guid_vwg = pconfig.get("dvelop_fields", "vwg")
                     if parent_guid_wie is not None and len(parent_guid_wie) > 30:
                         dms.add_upload_property(prop_guid=parent_guid_wie,
                                                 pvalue=prop_lookup_item.economic_unit.id_num,
@@ -93,7 +112,7 @@ def get_props_from_doc(pdoctext: str, pprops: list, wowi: WowiPy, psettings: dic
                                                 display_name="Wirtschaftseinheiten")
                     if parent_guid_vwg is not None and len(parent_guid_vwg) > 30:
                         dms.add_upload_property(prop_guid=parent_guid_vwg,
-                                                pvalue=prop_lookup_item.company_code.code,
+                                                pvalue=prop_lookup_item.company_id,
                                                 plist=ret_props,
                                                 display_name="VWG")
                     prop_value = prop_lookup_item.id_num
@@ -112,7 +131,7 @@ def get_props_from_doc(pdoctext: str, pprops: list, wowi: WowiPy, psettings: dic
     return ret_props
 
 
-def get_profile_props(profile_prop_path: str) -> dict:
+def get_mapping_props(profile_prop_path: str) -> dict:
     ret_dict = {}
     current_prop_id = ""
     current_dict = {}
@@ -144,7 +163,7 @@ def get_profile_props(profile_prop_path: str) -> dict:
     return ret_dict
 
 
-def get_profiles(profile_path: str, profile_props: dict) -> dict:
+def get_mappings(profile_path: str, profile_props: dict) -> dict:
     ret_dict = {}
     current_profile_id = ""
     current_dict = {"prop": [],
@@ -239,7 +258,8 @@ def text_without_spaces(pdf_text: str) -> str:
 
 
 def process_pdf_file(input_pdf_file: str, profile_dict: dict, temp_path: str, ignore_word_list: list,
-                     wowi: WowiPy, profile_persistence: bool = False):
+                     cache: WowiCache, dms: DvelopDmsPy, pconfig: configparser.ConfigParser,
+                     profile_persistence: bool = False):
     logger.debug(f"Processing {input_pdf_file}")
     basename = Path(input_pdf_file).stem
     ret_dict = {}
@@ -284,7 +304,11 @@ def process_pdf_file(input_pdf_file: str, profile_dict: dict, temp_path: str, ig
         current_doc_text += page_text
 
         if cr_comp:
-            dest_props = get_props_from_doc(current_doc_text, profile_dict.get(cr_id).get("prop"), wowi, settings)
+            dest_props = get_props_from_doc(pdoctext=current_doc_text,
+                                            pprops=profile_dict.get(cr_id).get("prop"),
+                                            cache=cache,
+                                            pconfig=pconfig,
+                                            dms=dms)
             dest_cat_guid = profile_dict.get(cr_id).get("category_id")
             dest_cat_name = profile_dict.get(cr_id).get("category_name")
             logger.debug(f"Page {page_num} dest_props: {dest_props}")
@@ -311,124 +335,109 @@ def upload_file(upl_file_path: str, dvelop_obj: DvelopDmsPy, dest_cat_name: str,
     return doc_id
 
 
-current_dir = os.path.abspath(os.path.dirname(__file__))
-settings = dotenv_values(os.path.join(current_dir, ".env"))
+def process_profile(profile_filepath: str, dms: DvelopDmsPy, cache: WowiCache):
+    config = configparser.ConfigParser(delimiters=('=',))
+    config.read(profile_filepath, encoding='utf-8')
+    current_dir = os.path.abspath(os.path.dirname(__file__))
 
-log_method = settings.get("log_method", "file").lower()
-log_level = settings.get("log_level", "info").lower()
-graylog_host = settings.get("graylog_host")
-graylog_port = int(settings.get("graylog_port", 12201))
-source_dir = settings.get("source_dir", os.path.join(current_dir, "ocr"))
-backup_path = settings.get("backup_path", os.path.join(current_dir, "backup"))
+    # Sanity checks
+    profile_name = os.path.basename(profile_filepath)
+    profile_basename = os.path.splitext(profile_name)[0]
+    profile_folder = os.path.dirname(profile_filepath).rstrip(os.path.sep)
+    profile_maps = os.path.join(profile_folder, f"{profile_basename}.map")
+    profile_props = os.path.join(profile_folder, f"{profile_basename}.prop")
+    logger.debug(f"Processing profile {profile_name}")
+    logger.debug(f"Maps: {profile_maps}")
+    logger.debug(f"Props: {profile_props}")
+    if not os.path.exists(profile_maps):
+        logger.error(f"File {profile_maps} does not exist")
+        return None
+    if not os.path.exists(profile_props):
+        logger.error(f"File {profile_props} does not exist.")
+        return None
+    input_path = config.get("general", "input_path")
+    backup_path = config.get("general", "backup_path", fallback=None)
+    error_path = config.get("general", "error_path", fallback=None)
+    if not os.path.exists(input_path):
+        logger.error(f"Path {input_path} does not exist.")
+        return None
+    if backup_path and not os.path.exists(backup_path):
+        logger.error(f"Path {backup_path} does not exist.")
+        return None
+    if error_path and not os.path.exists(error_path):
+        logger.error(f"Path {error_path} does not exist.")
+        return None
 
-dvelop_host = settings.get("dvelop_host")
-dvelop_key = settings.get("dvelop_key")
-dvelop_creditor_prop_name = settings.get("dvelop_creditor_prop_name")
+    # Diese Option steuert, ob eine Seite, zu der kein Mapping gefunden werden kann, automatisch zum vorherigen
+    # Mapping gezählt werden soll. Das beißt sich ggf. mit einem Fallback-Eintrag
+    mapping_persist = config.getboolean("general", "mapping_persistence", fallback=False)
 
-profiles_persist_raw = settings.get("profile_persistence")
-if profiles_persist_raw is not None and profiles_persist_raw.lower() == "true":
-    profiles_persist = True
-else:
-    profiles_persist = False
+    dry_run = config.getboolean("general", "dry_run", fallback=False)
+    if dry_run:
+        logger.info("Dry run!")
 
-# Logging
-logger = logging.getLogger(__name__)
-log_levels = {'debug': 10, 'info': 20, 'warning': 30, 'error': 40, 'critical': 50}
-logger.setLevel(log_levels.get(log_level, 20))
+    proplist = get_mapping_props(profile_prop_path=profile_props)
+    logger.debug(f"proplist: {proplist}")
+    logger.debug(f"Got {len(proplist)} properties from file.")
+    proflist = get_mappings(profile_maps, proplist)
+    logger.debug(f"Got {len(proflist)} profiles from file.")
 
-# Catch unhandled exceptions
-sys.excepthook = handle_unhandled_exception
+    ignore_keywords_str = config.get("general", "ignore_keywords", fallback=None)
+    ignore_keywords = []
+    if ignore_keywords_str is not None and len(ignore_keywords_str) > 0:
+        ignore_keywords = ignore_keywords_str.split("|")
 
-# Dry Run
-dry_run = False
-if dry_run:
-    logger.info("Dry run!")
+    logger.debug(f"ignore_keywords: {ignore_keywords}")
 
-if log_method == "file":
-    log_file_name = f"pdf2dvelop_{datetime.now().strftime('%Y_%m_%d')}.log"
-    log_path = os.path.join(current_dir, "log", log_file_name)
-    logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s',
-                        filename=log_path,
-                        filemode='a')
-elif log_method == "graylog":
-    handler = graypy.GELFUDPHandler(graylog_host, graylog_port)
-    logger.addHandler(handler)
+    pathlist = Path(input_path).rglob('*.pdf')
+    file_counter = 0
 
-# Catch unhandled exceptions
-sys.excepthook = handle_unhandled_exception
+    for sfile in pathlist:
+        file_counter += 1
+        # Split files and math creditors
+        logger.info(f"Processing {sfile}")
+        splitted_files = process_pdf_file(input_pdf_file=str(sfile),
+                                          profile_dict=proflist,
+                                          temp_path=os.path.join(current_dir, "temp"),
+                                          ignore_word_list=ignore_keywords,
+                                          cache=cache,
+                                          dms=dms,
+                                          profile_persistence=mapping_persist,
+                                          pconfig=config)
 
-logger.info(f"pdf2dvelop started. Reading files in {source_dir}")
+        if splitted_files is None or len(splitted_files) == 0:
+            err_file_path = os.path.join(error_path, f"{sfile.name}")
+            logger.error(f"Processing of file cancelled. Moving to {err_file_path}")
 
-prof_file = os.path.join(current_dir, ".profiles")
-prof_prop_file = os.path.join(current_dir, ".props")
-error_dir = os.path.join(current_dir, "errors")
-proplist = get_profile_props(prof_prop_file)
-# print(proplist)
-logger.debug(f"Got {len(proplist)} properties from file.")
-proflist = get_profiles(prof_file, proplist)
-logger.debug(f"Got {len(proflist)} profiles from file.")
-
-ignore_keywords_str = settings.get("ignore_keywords")
-ignore_keywords = []
-if ignore_keywords_str is not None and len(ignore_keywords_str) > 0:
-    ignore_keywords = ignore_keywords_str.split("|")
-
-# print(ignore_keywords)
-
-pathlist = Path(source_dir).rglob('*.pdf')
-file_counter = 0
-# Connect to d.velop
-dms = DvelopDmsPy(hostname=dvelop_host, api_key=dvelop_key)
-
-# Connect to OPENWOWI
-wowi_host = settings.get("wowi_host")
-wowi_user = settings.get("wowi_user")
-wowi_pass = settings.get("wowi_pass")
-wowi_key = settings.get("wowi_key")
-wowi_cache_buildings = settings.get("wowi_cache_buildings")
-openwowi = WowiPy(wowi_host, wowi_user, wowi_pass, wowi_key)
-openwowi.cache_from_disk(openwowi.CACHE_BUILDING_LANDS, wowi_cache_buildings)
-
-for sfile in pathlist:
-    file_counter += 1
-    # Split files and math creditors
-    logger.info(f"Processing {sfile}")
-    splitted_files = process_pdf_file(str(sfile), proflist, os.path.join(current_dir, "temp"), ignore_keywords,
-                                      openwowi, profiles_persist)
-
-    if splitted_files is None or len(splitted_files) == 0:
-        err_file_path = os.path.join(error_dir, f"{sfile.name}")
-        logger.error(f"Processing of file cancelled. Moving to {err_file_path}")
-
-        if not dry_run:
-            shutil.move(sfile, err_file_path)
-        continue
-    else:
-        backup_file_path = os.path.join(backup_path, "ocr", f"{sfile.name}")
-        logger.debug(f"Moving splitted ocr file to {backup_file_path}.")
-        if not dry_run:
-            shutil.move(sfile, backup_file_path)
-
-    # Uploading files to archive
-    logger.info(f"Splitted file in {len(splitted_files.keys())} parts. Uploading...")
-
-    for file_part in splitted_files.keys():
-        upload_file_settings = splitted_files.get(file_part)
-        logger.info(f"Uploading {file_part} ({upload_file_settings['profile_id']})...")
-        if dry_run:
+            if not dry_run:
+                shutil.move(sfile, err_file_path)
             continue
-        upl_result = upload_file(upl_file_path=file_part,
-                                 dvelop_obj=dms,
-                                 dest_cat_name=upload_file_settings['cat_name'],
-                                 dest_cat_id=upload_file_settings['cat_id'],
-                                 dest_props=upload_file_settings['dest_props'])
-        if upl_result is not None:
-            logger.info(f"Upload successful (Document id {upl_result}")
-            backup_file_path = os.path.join(backup_path, "uploaded", Path(file_part).name)
-            shutil.move(file_part, backup_file_path)
         else:
-            err_file_path = os.path.join(error_dir, f"{file_part}")
-            logger.error(f"Upload failed! Moving file to {err_file_path}")
-            shutil.move(file_part, err_file_path)
-            continue
-    logger.debug(f"Processing of file {sfile} finished.")
+            backup_file_path = os.path.join(backup_path, "ocr", f"{sfile.name}")
+            logger.debug(f"Moving splitted ocr file to {backup_file_path}.")
+            if not dry_run:
+                shutil.move(sfile, backup_file_path)
+
+        # Uploading files to archive
+        logger.info(f"Splitted file in {len(splitted_files.keys())} parts. Uploading...")
+
+        for file_part in splitted_files.keys():
+            upload_file_settings = splitted_files.get(file_part)
+            logger.info(f"Uploading {file_part} ({upload_file_settings['profile_id']})...")
+            if dry_run:
+                continue
+            upl_result = upload_file(upl_file_path=file_part,
+                                     dvelop_obj=dms,
+                                     dest_cat_name=upload_file_settings['cat_name'],
+                                     dest_cat_id=upload_file_settings['cat_id'],
+                                     dest_props=upload_file_settings['dest_props'])
+            if upl_result is not None:
+                logger.info(f"Upload successful (Document id {upl_result}")
+                backup_file_path = os.path.join(backup_path, "uploaded", Path(file_part).name)
+                shutil.move(file_part, backup_file_path)
+            else:
+                err_file_path = os.path.join(error_path, f"{file_part}")
+                logger.error(f"Upload failed! Moving file to {err_file_path}")
+                shutil.move(file_part, err_file_path)
+                continue
+        logger.debug(f"Processing of file {sfile} finished.")

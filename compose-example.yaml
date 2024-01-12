@@ -1,0 +1,19 @@
+version: '3.1'
+services:
+  app:
+    image: app-pdf2dvelop
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    restart: no
+    volumes:
+      - "./app:/app"
+      - "./profiles:/profiles"
+    networks:
+      - examplenet
+    container_name: pdf2dvelop
+
+networks:
+  examplenet:
+    name: examplenet
+    external: true
