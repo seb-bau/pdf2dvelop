@@ -70,3 +70,4 @@ for file_name in profile_files:
                     cache=cache)
 if config.getboolean("general", "remove_temp_files", fallback=True):
     clear_temp_files(temp_folder=os.path.join(current_dir, "temp"))
+logger.info("pdf2dvelop finished")
