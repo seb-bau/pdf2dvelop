@@ -504,7 +504,7 @@ def process_profile(profile_filepath: str, dms: DvelopDmsPy, cache: WowiCache):
                 shutil.move(sfile, err_file_path)
             continue
         else:
-            backup_file_path = os.path.join(backup_path, "ocr", f"{sfile.name}")
+            backup_file_path = os.path.join(backup_path, f"{sfile.name}")
             logger.debug(f"Moving splitted ocr file to {backup_file_path}.")
             if not dry_run:
                 shutil.move(sfile, backup_file_path)
