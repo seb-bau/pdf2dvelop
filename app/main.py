@@ -35,8 +35,8 @@ logger = log.setup_custom_logger('root', config.get('Logging', 'method', fallbac
                                  graylog_port=config.getint('Logging', 'graylog_port', fallback=0),
                                  graylog_app_name=config.get('Logging', 'graylog_app_name', fallback=None))
 
-if config.has_section("General") and config.has_option("General", "profile_path"):
-    profile_path = config.get("General", "profile_path")
+if config.has_section("general") and config.has_option("general", "profile_path"):
+    profile_path = config.get("general", "profile_path")
 else:
     profile_path = os.path.join(current_dir, "profiles")
 
