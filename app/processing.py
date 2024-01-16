@@ -525,7 +525,7 @@ def process_profile(profile_filepath: str, dms: DvelopDmsPy, cache: WowiCache):
                                      dest_props=upload_file_settings['dest_props'])
             if upl_result is not None:
                 logger.info(f"Upload successful (Document id {upl_result}")
-                backup_file_path = os.path.join(backup_path, "uploaded", Path(file_part).name)
+                backup_file_path = os.path.join(backup_path, Path(file_part).name)
                 shutil.move(file_part, backup_file_path)
             else:
                 err_file_path = os.path.join(error_path, f"{file_part}")
