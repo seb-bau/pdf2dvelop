@@ -1,5 +1,6 @@
 [general]
 # profile_path = None
+remove_temp_files = True
 
 [dvelop]
 host = xxx.d-velop.cloud
@@ -7,11 +8,11 @@ key = xxx
 repository = xxx
 
 [openwowi]
-cache_connection = mysql+pymysql://xxx:xxx@localhost:3306/wowicache
+cache_connection = xxx
 
 [Logging]
 method = file
-level = debug
+level = info
 # graylog_host = localhost
 # graylog_port = 12201
 # graylog_app_name = xxx

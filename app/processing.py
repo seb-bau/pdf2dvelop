@@ -1,11 +1,11 @@
 import configparser
 import os.path
-
 import PyPDF2
 import re
 import shutil
 import logging
 import sys
+import time
 from pathlib import Path
 from dvelopdmspy.dvelopdmspy import DvelopDmsPy
 from wowicache.models import WowiCache, Building
@@ -20,6 +20,25 @@ def handle_unhandled_exception(exc_type, exc_value, exc_traceback):
 
 logger = logging.getLogger('root')
 sys.excepthook = handle_unhandled_exception
+
+
+def cleanup_backup_folder(path: str, after_days: int):
+    if after_days == 0:
+        return True
+    try:
+        files = os.listdir(path)
+        current_time = time.time()
+        day = 86400
+        for file in files:
+            if file.endswith("*.pdf"):
+                file_path = os.path.join(path, file)
+                file_time = os.stat(file_path).st_mtime
+                if file_time < (current_time - (day * after_days)):
+                    os.remove(file_path)
+    except (OSError, IOError) as e:
+        logger.error(f"Error while cleaning up backup path {path}: {str(e)}")
+        return False
+    return True
 
 
 def remove_leading_zeroes(input_str: str):
@@ -68,8 +87,13 @@ def get_props_from_doc(pdoctext: str, pprops: list, cache: WowiCache, pconfig: c
         if item_type == "static":
             prop_value = item.get("value")
         elif item_type == "dynamic":
-            prop_value = re.search(item.get("regex"), pdoctext)
+            logger.debug(f"dynamic_item: {item_id} regex: {item.get('regex')}")
+            prop_regex = item.get('regex')
+            prop_value = re.search(prop_regex, pdoctext)
+            logger.debug(f"regex_groups: {prop_value}")
             regex_group = int(item.get("regex_group"))
+            if prop_value:
+                logger.debug(f"regex_match: {prop_value.group(regex_group).strip()}")
             if prop_value is not None:
                 replace_value = item.get("replace")
                 if replace_value is not None:
@@ -92,6 +116,7 @@ def get_props_from_doc(pdoctext: str, pprops: list, cache: WowiCache, pconfig: c
             prop_value = item_value
 
         if item_lookup is not None and prop_value is not None and len(prop_value.strip()) > 0:
+            logger.debug(f"item_lookup_val: {item_lookup}")
             item_raw_dvelop = item.get("dvelop_raw_guid")
             if item_raw_dvelop is not None and len(item_raw_dvelop) > 30:
                 dms.add_upload_property("", prop_value, item_raw_dvelop, ret_props)
@@ -99,7 +124,9 @@ def get_props_from_doc(pdoctext: str, pprops: list, cache: WowiCache, pconfig: c
                 prop_value = remove_leading_zeroes(prop_value)
                 prop_value = prop_value.replace("STRABE", "STRAßE")
                 prop_lookup_item: Building
+                logger.debug(f"address_to_building input: {prop_value}")
                 prop_lookup_item = address_to_building(prop_value, cache=cache, config=pconfig)
+                logger.debug(f"address_to_building output: {prop_lookup_item}")
                 if prop_lookup_item is not None:
                     # print(f"{prop_value} --> {prop_lookup_item.id_num}")
 
@@ -153,7 +180,6 @@ def get_mapping_props(profile_prop_path: str) -> dict:
                 if len(str_parts) != 2:
                     logger.error(f"Illegal param count in get_profile_props. Param {line} line {line_count}")
                     continue  # Wirklich? Oder abbrechen?
-
                 str_key = str_parts[0]
                 str_value = str_parts[1]
                 current_dict[str_key] = str_value
@@ -234,44 +260,61 @@ def get_mapping_id(pdf_text: str, mapping_dict: dict):
     return None
 
 
-def get_mapping_id_and_completion(pdf_text: str, mapping_dict: dict, old_mapping: str = None,
-                                  mapping_persistence: bool = False, mapping_persistence_sticky: bool = False):
-    pdf_text = text_without_spaces(pdf_text)
-    ret_map_comp = False
-    ret_seperate = False
-    ret_map_id = get_mapping_id(pdf_text, mapping_dict)
-
-    # Achtung, ggf. unerwartetes Verhalten bei mapping_persistence: Ist die persistence aktiv, wird IMMER das vorherige
-    # Mapping verwendet, auch wenn auf der aktuellen Seite ein abweichendes Mapping erkannt wird. Wird beim Scan die
-    # letzte Seite vergessen, führt das dazu, dass das nächste Dokument dem vorherigen Mapping angehängt wird.
-
-    # Es wäre denkbar, in Zukunft eine Funktion einzubauen, die bei einem abweichenden Mapping das Ende des Dokumentes
-    # für die vorletzte Seite meldet. Damit könnte man auf Fehler reagieren, die beim Scan passieren
-
-    if ret_map_id is None and mapping_persistence:
-        ret_map_id = old_mapping
-    if old_mapping is not None and mapping_persistence_sticky:
-        ret_map_id = old_mapping
-
-    if ret_map_id != old_mapping or old_mapping == "fallback":
-        ret_seperate = True
-
-    if ret_map_id is not None:
-        ret_map_comp = keywords_in_text(pdf_text, mapping_dict.get(ret_map_id).get("completion"))
-
-    # Fallback-Entry (falls vorhanden)
-    if ret_map_id is None:
-        if "fallback" in mapping_dict.keys():
-            ret_map_id = "fallback"
-            ret_seperate = True
-    return ret_map_id, ret_map_comp, ret_seperate
-
-
 def text_without_spaces(pdf_text: str) -> str:
     pdf_text = pdf_text.strip()
     pdf_text = pdf_text.replace(" ", "")
     pdf_text = pdf_text.replace("  ", "")
     return pdf_text
+
+
+def write_part(temp_path: str, basename: str, pdf_stream, part_number, current_text: str, map_id: str):
+    dest_file_path = os.path.join(temp_path, f"{basename}_p{part_number}.pdf")
+    with open(dest_file_path, 'wb') as output_file:
+        pdf_stream.write(output_file)
+        return {
+            "file": dest_file_path,
+            "text": current_text,
+            "map_id": map_id
+        }
+
+
+def split_and_get_text(source_file: str, page_map: dict, temp_path: str, basename: str):
+    ret_part_map = {}
+    current_doc = PyPDF2.PdfWriter()
+    current_text = None
+    last_part_num = 0
+    page_counter = 0
+    with open(source_file, 'rb') as pdf_file:
+        pdf_reader = PyPDF2.PdfReader(pdf_file)
+        for page_num in range(len(pdf_reader.pages)):
+            page_counter += 1
+            page = pdf_reader.pages[page_num]
+            page_text = page.extract_text()
+            map_entry = page_map.get(page_counter)
+            if map_entry is None:
+                continue
+            if last_part_num != map_entry.get("part_num"):
+                ret_part_map[last_part_num] = write_part(temp_path=temp_path,
+                                                         basename=basename,
+                                                         pdf_stream=current_doc,
+                                                         part_number=last_part_num,
+                                                         current_text=current_text,
+                                                         map_id=map_entry.get("map_id"))
+                current_doc = PyPDF2.PdfWriter()
+                current_text = None
+            current_doc.add_page(page)
+            if current_text is not None:
+                current_text = f"{current_text}\n{page_text}"
+            else:
+                current_text = page_text
+            last_part_num = map_entry.get("part_num")
+        ret_part_map[last_part_num] = write_part(temp_path=temp_path,
+                                                 basename=basename,
+                                                 pdf_stream=current_doc,
+                                                 part_number=last_part_num,
+                                                 current_text=current_text,
+                                                 map_id=map_entry.get("map_id"))
+        return ret_part_map
 
 
 def process_pdf_file(input_pdf_file: str, mapping_dict: dict, temp_path: str, ignore_word_list: list,
@@ -280,83 +323,97 @@ def process_pdf_file(input_pdf_file: str, mapping_dict: dict, temp_path: str, ig
     logger.debug(f"Processing {input_pdf_file}")
     basename = Path(input_pdf_file).stem
     ret_dict = {}
-    pdf_reader = PyPDF2.PdfReader(input_pdf_file)
-    num_pages = len(pdf_reader.pages)
-    logger.debug(f"Number of pages: {num_pages}")
+    with (open(input_pdf_file, 'rb') as pdf_file):
+        pdf_reader = PyPDF2.PdfReader(pdf_file)
+        num_pages = len(pdf_reader.pages)
+        logger.debug(f"Number of pages: {num_pages}")
 
-    file_num = 0
-    current_doc = None
-    current_doc_text = ""
-    current_page_count = 0
-    current_cr_id = None
-    for page_num in range(num_pages):
-        page = pdf_reader.pages[page_num]
-        page_text = page.extract_text()
-        if keywords_in_text(text_without_spaces(page_text), ignore_word_list, False):
-            logger.warning(f"Page {page_num + 1} ignored because of blacklist.")
-            continue
-        if len(page_text.strip()) < 20:
-            # logger.warning(f"No text on page {page_num + 1} of file {input_pdf_file}")
-            continue
+        file_num = 0
+        last_cr_id = None
+        last_was_complete = True
+        page_counter = 0
+        page_map = {}
+        for page_num in range(num_pages):
+            page_counter += 1
+            page = pdf_reader.pages[page_num]
+            page_text = page.extract_text()
+            page_text_no_space = text_without_spaces(page_text)
+            if keywords_in_text(page_text_no_space, ignore_word_list, False):
+                page_map[page_counter] = None
+                logger.warning(f"Page {page_counter} ignored because of blacklist.")
+                continue
+            if len(page_text.strip()) < 20:
+                blank_handling = pconfig.get("general", "blank_page_handling", fallback="add").lower()
+                if blank_handling == "add":
+                    page_map[page_counter] = {
+                        "map_id": last_cr_id,
+                        "complete": last_was_complete,
+                        "part_num": file_num
+                    }
+                elif blank_handling == "ignore":
+                    page_map[page_counter] = None
+                elif blank_handling == "fail":
+                    logger.error(f"No text on page {page_counter} of file {input_pdf_file}. Exiting.")
+                    return None
+                continue
 
-        logger.debug(f"Extracted text from page {page_num + 1}:\n{page_text}")
-        seperate: bool
-        cr_id, cr_comp, seperate = get_mapping_id_and_completion(page_text, mapping_dict,
-                                                                 current_cr_id, mapping_persistence,
-                                                                 mapping_persistence_sticky=mapping_persistence_sticky)
-        current_cr_id = cr_id
-        logger.debug(f"Mapping: {cr_id}. Doc completed: {cr_comp}")
+            logger.debug(f"Extracted text from page {page_counter}:\n{page_text}")
 
-        if cr_id is None:
-            logger.error(f"Could not determin mapping for file {input_pdf_file} page {page_num + 1}")
-            logger.error(page_text)
-            return None
+            cr_id = get_mapping_id(page_text_no_space, mapping_dict)
+            needs_separation = False
+            if last_cr_id and cr_id != last_cr_id and not last_was_complete:
+                if mapping_persistence_sticky:
+                    cr_id = last_cr_id
+                else:
+                    needs_separation = True
+            if cr_id is None and not last_was_complete and mapping_persistence:
+                cr_id = last_cr_id
 
-        if current_doc is None:
-            logger.debug("current_doc is None, creating new.")
-            current_doc = PyPDF2.PdfWriter()
-            current_doc_text = ""
-            current_page_count = 0
+            if cr_id is not None:
+                cr_comp = keywords_in_text(page_text_no_space, mapping_dict.get(cr_id).get("completion"))
 
-        # Weiter machen: Testen, ob fallback funktioniert
-        # UND: Cache prüfen
+            if cr_id is None and "fallback" in mapping_dict.keys():
+                needs_separation = True
+                cr_id = "fallback"
+                cr_comp = True
 
-        if not seperate:
-            logger.debug("Adding page to document.")
-            current_doc.add_page(page)
-            current_page_count += 1
-            current_doc_text += page_text
+            if cr_id is None:
+                logger.error(f"Could not determin mapping for file {input_pdf_file} page {page_counter}")
+                logger.error(page_text)
+                return None
 
-        if cr_comp or seperate:
-            dest_props = get_props_from_doc(pdoctext=current_doc_text,
-                                            pprops=mapping_dict.get(cr_id).get("prop"),
-                                            cache=cache,
-                                            pconfig=pconfig,
-                                            dms=dms)
-            dest_cat_guid = mapping_dict.get(cr_id).get("category_id")
-            dest_cat_name = mapping_dict.get(cr_id).get("category_name")
-            logger.debug(f"Page {page_num} dest_props: {dest_props}")
-            logger.debug("End of doc, closing.")
-            file_num += 1
-            dest_file_path = os.path.join(temp_path, f"{basename}_p{file_num}.pdf")
-            if current_page_count > 3:
-                print(f"{input_pdf_file} page {page_num} pagecount {current_page_count}")
-            with open(dest_file_path, 'wb') as output_file:
-                current_doc.write(output_file)
-                ret_dict[dest_file_path] = {"profile_id": cr_id,
-                                            "dest_props": dest_props,
-                                            "cat_name": dest_cat_name,
-                                            "cat_id": dest_cat_guid}
-            current_doc = None
-            current_page_count = 0
-            current_cr_id = None
+            if needs_separation and not last_was_complete:
+                file_num += 1
 
-        if seperate:
-            logger.debug("Seperating page to document.")
-            current_doc = PyPDF2.PdfWriter()
-            current_doc.add_page(page)
-            current_page_count += 1
-            current_doc_text = page_text
+            pagemap_entry = {
+                "map_id": cr_id,
+                "complete": cr_comp,
+                "part_num": file_num
+            }
+            if cr_comp:
+                file_num += 1
+            last_cr_id = cr_id
+            last_was_complete = cr_comp
+            page_map[page_counter] = pagemap_entry
+
+    logger.debug(f"page_map:{page_map}")
+    file_map = split_and_get_text(source_file=input_pdf_file, page_map=page_map, temp_path=temp_path, basename=basename)
+    # logger.debug(f"file_map:{file_map}")
+    for entry_id in file_map.keys():
+        entry = file_map.get(entry_id)
+        map_id = entry.get("map_id")
+        dest_props = get_props_from_doc(pdoctext=entry.get("text"),
+                                        pprops=mapping_dict.get(map_id).get("prop"),
+                                        cache=cache,
+                                        pconfig=pconfig,
+                                        dms=dms)
+        dest_cat_guid = mapping_dict.get(map_id).get("category_id")
+        dest_cat_name = mapping_dict.get(map_id).get("category_name")
+        ret_dict[entry.get("file")] = {"profile_id": map_id,
+                                       "dest_props": dest_props,
+                                       "cat_name": dest_cat_name,
+                                       "cat_id": dest_cat_guid}
+
     return ret_dict
 
 
@@ -382,8 +439,6 @@ def process_profile(profile_filepath: str, dms: DvelopDmsPy, cache: WowiCache):
         logger.warning(f"Profile {profile_name} is disabled. Skipping.")
         return None
     logger.debug(f"Processing profile {profile_name}")
-    logger.debug(f"Maps: {profile_maps}")
-    logger.debug(f"Props: {profile_props}")
     if not os.path.exists(profile_maps):
         logger.error(f"File {profile_maps} does not exist")
         return None
@@ -413,7 +468,6 @@ def process_profile(profile_filepath: str, dms: DvelopDmsPy, cache: WowiCache):
         logger.info("Dry run!")
 
     proplist = get_mapping_props(profile_prop_path=profile_props)
-    logger.debug(f"proplist: {proplist}")
     logger.debug(f"Got {len(proplist)} properties from file.")
     proflist = get_mappings(profile_maps, proplist)
     logger.debug(f"Got {len(proflist)} profiles from file.")
@@ -479,3 +533,5 @@ def process_profile(profile_filepath: str, dms: DvelopDmsPy, cache: WowiCache):
                 shutil.move(file_part, err_file_path)
                 continue
         logger.debug(f"Processing of file {sfile} finished.")
+    cleanup_after = config.getint("general", "delete_backup_after_days", fallback=0)
+    cleanup_backup_folder(path=backup_path, after_days=cleanup_after)

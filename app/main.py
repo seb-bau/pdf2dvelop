@@ -14,6 +14,16 @@ def handle_unhandled_exception(exc_type, exc_value, exc_traceback):
     logger.critical("Unhandled exception", exc_info=(exc_type, exc_value, exc_traceback))
 
 
+def clear_temp_files(temp_folder: str):
+    try:
+        tempfiles = os.listdir(temp_folder)
+        for tempfile in tempfiles:
+            if tempfile.endswith(".pdf"):
+                os.remove(os.path.join(temp_folder, tempfile))
+    except (OSError, IOError) as e:
+        logger.error(f"Error while clearing temp folder: {str(e)}")
+
+
 sys.excepthook = handle_unhandled_exception
 current_dir = os.path.abspath(os.path.dirname(__file__))
 config = configparser.ConfigParser(delimiters=('=',))
@@ -58,3 +68,5 @@ for file_name in profile_files:
     process_profile(profile_filepath=profile_filepath,
                     dms=dms,
                     cache=cache)
+if config.getboolean("general", "remove_temp_files", fallback=True):
+    clear_temp_files(temp_folder=os.path.join(current_dir, "temp"))
