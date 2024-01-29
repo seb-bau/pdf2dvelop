@@ -308,12 +308,13 @@ def split_and_get_text(source_file: str, page_map: dict, temp_path: str, basenam
             else:
                 current_text = page_text
             last_part_num = map_entry.get("part_num")
-        ret_part_map[last_part_num] = write_part(temp_path=temp_path,
-                                                 basename=basename,
-                                                 pdf_stream=current_doc,
-                                                 part_number=last_part_num,
-                                                 current_text=current_text,
-                                                 map_id=map_entry.get("map_id"))
+        if current_text is not None and map_entry is not None:
+            ret_part_map[last_part_num] = write_part(temp_path=temp_path,
+                                                     basename=basename,
+                                                     pdf_stream=current_doc,
+                                                     part_number=last_part_num,
+                                                     current_text=current_text,
+                                                     map_id=map_entry.get("map_id"))
         return ret_part_map
 
 
